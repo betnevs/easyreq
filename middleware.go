@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func parseRequestURL(c *Client, r *Request) error {
@@ -180,6 +184,167 @@ func createHTTPRequest(c *Client, r *Request) (err error) {
 
 func addCredentials(c *Client, r *Request) error {
 	var isBasicAuth bool
+	if c.UserInfo != nil {
+		r.RawRequest.SetBasicAuth(c.UserInfo.Username, c.UserInfo.Password)
+		isBasicAuth = true
+	}
+
+	if r.UserInfo != nil {
+		r.RawRequest.SetBasicAuth(r.UserInfo.Username, r.UserInfo.Password)
+		isBasicAuth = true
+	}
+
+	if !c.DisableWarn {
+		if isBasicAuth && !strings.HasPrefix(r.URL, "https") {
+			c.log.Warnf("Using Basic Auth in HTTP mode is not secure, Use HTTPS")
+		}
+	}
+
+	var authScheme string
+	if !IsEmptyString(c.AuthScheme) {
+		authScheme = c.AuthScheme
+	} else if !IsEmptyString(r.AuthScheme) {
+		authScheme = c.AuthScheme
+	} else {
+		authScheme = "Bearer"
+	}
+
+	if !IsEmptyString(c.Token) {
+		r.RawRequest.Header.Set(c.HeaderAuthorizationKey, authScheme+" "+c.Token)
+	}
+
+	if !IsEmptyString(r.Token) {
+		r.RawRequest.Header.Set(c.HeaderAuthorizationKey, authScheme+" "+r.Token)
+	}
+
+	return nil
+}
+
+func requestLogger(c *Client, r *Request) error {
+	if c.Debug {
+		rr := r.RawRequest
+		rl := &RequestLog{Header: copyHeaders(rr.Header), Body: r.fmtBodyString(c.debugBodySizeLimit)}
+		if c.requestLog != nil {
+			if err := c.requestLog(rl); err != nil {
+				return err
+			}
+		}
+
+		// log
+		reqLog := "\n==============================================================================\n" +
+			"~~~ REQUEST ~~~\n" +
+			fmt.Sprintf("%s  %s  %s", r.Method, rr.URL.RequestURI(), rr.Proto) +
+			fmt.Sprintf("HOST   : %s\n", rr.URL.Host) +
+			fmt.Sprintf("HEADERS: \n%s\n", composeHeaders(c, r, rl.Header)) +
+			fmt.Sprintf("BODY   : \n%s\n", rl.Body) +
+			"------------------------------------------------------------------------------\n"
+
+		r.store(debugRequestLogKey, reqLog)
+	}
+
+	return nil
+}
+
+func responseLogger(c *Client, resp *Response) error {
+	if c.Debug {
+		rl := &ResponseLog{Header: copyHeaders(resp.Header()), Body: resp.fmtBodyString(c.debugBodySizeLimit)}
+		if c.responseLog != nil {
+			if err := c.responseLog(rl); err != nil {
+				return err
+			}
+		}
+
+		debugLog := resp.Request.load(debugRequestLogKey).(string)
+		debugLog += "~~~ RESPONSE ~~~\n" +
+			fmt.Sprintf("STATUS       : %s\n", resp.Status()) +
+			fmt.Sprintf("PROTO        : %s\n", resp.RawResponse.Proto) +
+			fmt.Sprintf("RECEIVED AT  : %v\n", resp.ReceivedAt().Format(time.RFC3339Nano)) +
+			fmt.Sprintf("TIME DURATION: %v\n", resp.Cost()) +
+			"HEADERS      :\n" +
+			composeHeaders(c, resp.Request, rl.Header) + "\n"
+
+		if resp.Request.isSaveResponse {
+			debugLog += "BODY         :\n***** RESPONSE WRITTEN INTO FILE *****\n"
+		} else {
+			debugLog += fmt.Sprintf("BODY         :\n%v\n", rl.Body)
+		}
+		debugLog += "==============================================================================\n"
+
+		c.log.Debugf("%s", debugLog)
+	}
+
+	return nil
+}
+
+func parseResponseBody(c *Client, resp *Response) (err error) {
+	if resp.StatusCode() == http.StatusNoContent {
+		return
+	}
+
+	// Handle JSON or XML
+	contentType := firstNonEmpty(resp.Request.forceContentType, resp.Header().Get(hdrContentTypeKey), resp.Request.fallbackContentType)
+	if isJSONContentType(contentType) || isXMLContentType(contentType) {
+		switch {
+		case resp.IsSuccess():
+			resp.Request.Error = nil
+			if resp.Request.Result != nil {
+				err = Unmarshalc(c, contentType, resp.body, resp.Request.Result)
+			}
+		case resp.IsError():
+			if resp.Request.Error == nil && c.Error != nil {
+				resp.Request.Error = reflect.New(c.Error).Interface()
+			}
+
+			if resp.Request.Error != nil {
+				err = Unmarshalc(c, contentType, resp.body, resp.Request.Error)
+			}
+		}
+	}
+
+	return
+}
+
+func saveResponseIntoFile(c *Client, resp *Response) error {
+	if resp.Request.isSaveResponse {
+		var file string
+		if len(c.outputDirectory) > 0 && !filepath.IsAbs(resp.Request.outputFile) {
+			file += c.outputDirectory + string(filepath.Separator)
+		}
+
+		file = filepath.Clean(file + resp.Request.outputFile)
+		if err := createDirectory(filepath.Dir(file)); err != nil {
+			return err
+		}
+
+		outFile, err := os.Create(file)
+		if err != nil {
+			return err
+		}
+
+		defer closeq(outFile)
+		defer closeq(resp.RawResponse.Body)
+
+		written, err := io.Copy(outFile, resp.RawResponse.Body)
+		if err != nil {
+			return err
+		}
+
+		resp.size = written
+	}
+
+	return nil
+}
+
+func createDirectory(dir string) error {
+	if _, err := os.Stat(dir); err != nil {
+		if os.IsNotExist(err) {
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
 
 func handleRequestBody(c *Client, r *Request) error {

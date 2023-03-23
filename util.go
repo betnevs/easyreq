@@ -47,6 +47,26 @@ func hasHTTPScheme(url string) bool {
 	return false
 }
 
+func firstNonEmpty(str ...string) string {
+	for _, s := range str {
+		if !IsEmptyString(s) {
+			return s
+		}
+	}
+
+	return ""
+}
+
+func Unmarshalc(c *Client, contentType string, b []byte, d interface{}) (err error) {
+	if isJSONContentType(contentType) {
+		err = c.JSONUnmarshal(b, d)
+	} else if isXMLContentType(contentType) {
+		err = c.XMLUnmarshal(b, d)
+	}
+
+	return
+}
+
 func copyHeaders(headers http.Header) http.Header {
 	nh := http.Header{}
 	for k, v := range headers {
@@ -120,21 +140,6 @@ func sortHeaderKeys(headers http.Header) []string {
 
 	sort.Strings(keys)
 	return keys
-}
-
-type noRetryErr struct {
-	err error
-}
-
-func (e *noRetryErr) Error() string {
-	if e.err == nil {
-		return "<nil>"
-	}
-	return fmt.Sprintf("wrap no retry err: %s", e.err.Error())
-}
-
-func wrapNoRetryErr(err error) error {
-	return fmt.Errorf("wrap no retry err: %w", err)
 }
 
 func addFile(w *multipart.Writer, fileName string, path string) error {

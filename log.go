@@ -1,7 +1,6 @@
 package easyreq
 
 import (
-	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -60,29 +59,4 @@ type RequestLog struct {
 type ResponseLog struct {
 	Header http.Header
 	Body   string
-}
-
-func requestLogger(c *Client, r *Request) error {
-	if c.Debug {
-		rr := r.RawRequest
-		rl := &RequestLog{Header: copyHeaders(rr.Header), Body: r.fmtBodyString(c.debugBodySizeLimit)}
-		if c.requestLog != nil {
-			if err := c.requestLog(rl); err != nil {
-				return err
-			}
-		}
-
-		// log
-		reqLog := "\n==============================================================================\n" +
-			"~~~ REQUEST ~~~\n" +
-			fmt.Sprintf("%s  %s  %s", r.Method, rr.URL.RequestURI(), rr.Proto) +
-			fmt.Sprintf("HOST   : %s\n", rr.URL.Host) +
-			fmt.Sprintf("HEADERS: \n%s\n", composeHeaders(c, r, rl.Header)) +
-			fmt.Sprintf("BODY   : \n%s\n", rl.Body) +
-			"------------------------------------------------------------------------------\n"
-
-		r.store(debugRequestLogKey, reqLog)
-	}
-
-	return nil
 }

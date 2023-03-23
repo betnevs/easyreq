@@ -2,11 +2,13 @@ package easyreq
 
 import (
 	"bytes"
+	"compress/gzip"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
@@ -148,6 +150,11 @@ func (c *Client) SetScheme(scheme string) *Client {
 	return c
 }
 
+func (c *Client) SetTimeOut(timeout time.Duration) *Client {
+	c.httpClient.Timeout = timeout
+	return c
+}
+
 func (c *Client) SetQueryParam(key, value string) *Client {
 	c.QueryParams.Set(key, value)
 	return c
@@ -214,7 +221,7 @@ func (c *Client) SetAuthScheme(authScheme string) *Client {
 	return c
 }
 
-func (c *Client) SetToken(token string) *Client {
+func (c *Client) SetAuthToken(token string) *Client {
 	c.Token = token
 	return c
 }
@@ -226,6 +233,11 @@ func (c *Client) SetCookie(cookie *http.Cookie) *Client {
 
 func (c *Client) SetCookies(cookies []*http.Cookie) *Client {
 	c.Cookies = append(c.Cookies, cookies...)
+	return c
+}
+
+func (c *Client) SetCookieJar(jar http.CookieJar) *Client {
+	c.httpClient.Jar = jar
 	return c
 }
 
@@ -504,6 +516,10 @@ func (c *Client) GetHTTPClient() *http.Client {
 	return c.httpClient
 }
 
+func (c *Client) IsSetProxy() bool {
+	return c.proxyURL != nil
+}
+
 func (c *Client) outputLogTo(w io.Writer) *Client {
 	c.log.(*logger).l.SetOutput(w)
 	return c
@@ -516,9 +532,28 @@ func (c *Client) transport() (*http.Transport, error) {
 	return nil, errors.New("transport instance should be *http.Transport")
 }
 
+func (c *Client) NewRequest() *Request {
+	return c.Req()
+}
+
 func (c *Client) Req() *Request {
-	// TODO need supplement
-	return &Request{}
+	return &Request{
+		QueryParams:    url.Values{},
+		FormData:       url.Values{},
+		Header:         http.Header{},
+		client:         c,
+		PathParams:     map[string]string{},
+		jsonEscapeHTML: true,
+	}
+}
+
+var errNoRetry = errors.New("don't need retry")
+
+func wrapNoRetryErr(err error) error {
+	if err != nil {
+		return fmt.Errorf("%s:%w", err.Error(), errNoRetry)
+	}
+	return errNoRetry
 }
 
 func (c *Client) execute(req *Request) (*Response, error) {
@@ -549,15 +584,85 @@ func (c *Client) execute(req *Request) (*Response, error) {
 		}
 	}
 
-	// request log
+	// log request content
 	if err = requestLogger(c, req); err != nil {
 		return nil, wrapNoRetryErr(err)
 	}
 
 	// construct http request and do request
+	req.RawRequest.Body = newRequestBodyReleaser(req.RawRequest.Body, req.bodyBuf)
+	req.Time = time.Now()
+	resp, err := c.httpClient.Do(req.RawRequest)
+
+	response := &Response{
+		Request:     req,
+		RawResponse: resp,
+	}
+
+	if err != nil || req.notParseResponse || c.notParseResponse {
+		response.setReceivedAt()
+		return response, err
+	}
 
 	// parse response
+	if !req.isSaveResponse {
+		defer closeq(resp.Body)
+		body := resp.Body
 
+		// handle gzip compress issue
+		if strings.EqualFold(resp.Header.Get(hdrContentTypeKey), "gzip") && resp.ContentLength != 0 {
+			if _, ok := body.(*gzip.Reader); !ok {
+				body, err = gzip.NewReader(body)
+				if err != nil {
+					response.setReceivedAt()
+					return response, err
+				}
+				defer closeq(body)
+			}
+		}
+
+		if response.body, err = io.ReadAll(body); err != nil {
+			response.setReceivedAt()
+			return response, err
+		}
+
+		response.size = int64(len(response.body))
+	}
+
+	response.setReceivedAt()
+
+	for _, f := range c.afterResponse {
+		if err = f(c, response); err != nil {
+			break
+		}
+	}
+
+	return response, wrapNoRetryErr(err)
+}
+
+type requestBodyReleaser struct {
+	once   sync.Once
+	reqBuf *bytes.Buffer
+	io.ReadCloser
+}
+
+func newRequestBodyReleaser(body io.ReadCloser, reqBuf *bytes.Buffer) io.ReadCloser {
+	if reqBuf == nil {
+		return body
+	}
+
+	return &requestBodyReleaser{
+		reqBuf:     reqBuf,
+		ReadCloser: body,
+	}
+}
+
+func (rr *requestBodyReleaser) Close() error {
+	err := rr.ReadCloser.Close()
+	rr.once.Do(func() {
+		releaseBuffer(rr.reqBuf)
+	})
+	return err
 }
 
 type ResponseError struct {
@@ -620,7 +725,11 @@ func createClient(hc *http.Client) *Client {
 
 	c.udBeforeRequest = []RequestMiddleware{}
 
-	c.afterResponse = []ResponseMiddleware{}
+	c.afterResponse = []ResponseMiddleware{
+		responseLogger,
+		parseResponseBody,
+		saveResponseIntoFile,
+	}
 
 	return c
 }
