@@ -60,7 +60,7 @@ type (
 	ResponseLogCallback func(*ResponseLog) error
 
 	PreRequestHook func(*Client, *http.Request) error
-	ErrorHook      func(*Request, error)
+	ErrorHook      func(*Request, *Response, error)
 )
 
 type User struct {
@@ -551,7 +551,7 @@ var errNoRetry = errors.New("don't need retry")
 
 func wrapNoRetryErr(err error) error {
 	if err != nil {
-		return fmt.Errorf("%s:%w", err.Error(), errNoRetry)
+		return fmt.Errorf("%s: %w", err.Error(), errNoRetry)
 	}
 	return errNoRetry
 }
@@ -665,26 +665,10 @@ func (rr *requestBodyReleaser) Close() error {
 	return err
 }
 
-type ResponseError struct {
-	Err      error
-	Response *Response
-}
-
-func (r *ResponseError) Error() string {
-	return r.Err.Error()
-}
-
-func (r *ResponseError) Unwrap() error {
-	return r.Err
-}
-
 func (c *Client) onErrorHooks(req *Request, resp *Response, err error) {
 	if err != nil {
-		if resp != nil {
-			err = &ResponseError{Err: err, Response: resp}
-		}
 		for _, h := range c.errorHooks {
-			h(req, err)
+			h(req, resp, err)
 		}
 	}
 }

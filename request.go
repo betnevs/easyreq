@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -298,14 +297,16 @@ func (r *Request) GetTraceInfo() TraceInfo {
 func (r *Request) Execute(method, url string) (*Response, error) {
 	var (
 		addrs []*net.SRV
-		err   error
 		resp  *Response
+		err   error
 	)
-	// check method
-	if r.isMultiPart && !(method == MethodPost || method == MethodPut || method == MethodPatch) {
-		return nil, fmt.Errorf("multipart request is not allowed in HTTP method[%s]", method)
+
+	// http method check (post, put)
+	if r.isMultiPart && !(method == MethodPut || method == MethodPost) {
+		return nil, fmt.Errorf("multipart content is not allowed in HTTP method[%s]", method)
 	}
-	// SRV handle
+
+	// DNS SRV handle
 	if r.SRV != nil {
 		_, addrs, err = net.LookupSRV(r.SRV.Service, "tcp", r.SRV.Domain)
 		if err != nil {
@@ -314,21 +315,39 @@ func (r *Request) Execute(method, url string) (*Response, error) {
 		}
 	}
 
-	// construct request url
+	// set URL and Method
 	r.Method = method
 	r.URL = r.selectAddr(addrs, url, 0)
 
-	// execute with no retry
+	// no retry
 	if r.client.RetryCount == 0 {
 		r.Attempt = 1
 		resp, err = r.client.execute(r)
-		r.client.onErrorHooks(r, resp, unwrapNoRetryErr(err))
-		errors.As()
-		return resp, unwrapNoRetryErr(err)
+		r.client.onErrorHooks(r, resp, err)
+		return resp, err
 	}
 
-	// retry
+	// retry http request
+	resp, err = Backoff(
+		func() (*Response, error) {
+			r.Attempt++
+			r.URL = r.selectAddr(addrs, url, r.Attempt)
 
+			resp, err := r.client.execute(r)
+			if err != nil {
+				r.client.log.Errorf("request failed in back off period, attempt: %d", err.Error(), r.Attempt)
+			}
+			return resp, err
+		},
+		Retries(r.client.RetryCount),
+		WaitTime(r.client.RetryWaitTime),
+		MaxWaitTime(r.client.RetryMaxWaitTime),
+		RetryConditions(append(r.retryConditions, r.client.RetryConditions...)),
+		RetryHooks(r.client.RetryHooks),
+	)
+
+	r.client.onErrorHooks(r, resp, err)
+	return resp, err
 }
 
 func (r *Request) store(key string, val any) {
