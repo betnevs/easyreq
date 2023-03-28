@@ -294,6 +294,38 @@ func (r *Request) GetTraceInfo() TraceInfo {
 	return ti
 }
 
+func (r *Request) Get(url string) (*Response, error) {
+	return r.Execute(MethodGet, url)
+}
+
+func (r *Request) Head(url string) (*Response, error) {
+	return r.Execute(MethodHead, url)
+}
+
+func (r *Request) Post(url string) (*Response, error) {
+	return r.Execute(MethodPost, url)
+}
+
+func (r *Request) Put(url string) (*Response, error) {
+	return r.Execute(MethodPut, url)
+}
+
+func (r *Request) Delete(url string) (*Response, error) {
+	return r.Execute(MethodDelete, url)
+}
+
+func (r *Request) Options(url string) (*Response, error) {
+	return r.Execute(MethodOptions, url)
+}
+
+func (r *Request) Patch(url string) (*Response, error) {
+	return r.Execute(MethodPatch, url)
+}
+
+func (r *Request) Send() (*Response, error) {
+	return r.Execute(r.Method, r.URL)
+}
+
 func (r *Request) Execute(method, url string) (*Response, error) {
 	var (
 		addrs []*net.SRV
